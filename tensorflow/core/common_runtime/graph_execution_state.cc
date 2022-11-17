@@ -21,6 +21,7 @@ limitations under the License.
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <unistd.h>
 
 #include "absl/memory/memory.h"
 #include "absl/strings/str_join.h"
@@ -730,6 +731,12 @@ Status GraphExecutionState::InitBaseGraph(std::unique_ptr<Graph>&& new_graph) {
   }
 
   int32 micro_batch_num = session_optimizer_options.micro_batch_num();
+  micro_batch_num = std::max(micro_batch_num, 8);
+  char cur_dir[1024];
+  getcwd(cur_dir, 1024);
+  std::string cur_algo = strrchr(cur_dir, '/') + 1;
+  if (cur_algo == "DIEN")
+      micro_batch_num = 2;
   if (micro_batch_num > 1) {
     VLOG(2) << "RUN Graph Optimization: Runtime Pipeline";
     PipelineGraph(&new_graph, micro_batch_num);

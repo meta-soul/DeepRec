@@ -857,7 +857,7 @@ def embedding_column(categorical_column,
                      max_norm=None,
                      trainable=True,
                      coalesced_scope=None,
-                     do_fusion=False):
+                     do_fusion=True):
   """`DenseColumn` that converts from sparse, categorical input.
 
   Use this when your inputs are sparse, but you want to convert them to a dense
@@ -1019,7 +1019,7 @@ def shared_embedding_columns(categorical_columns,
                              tensor_name_in_ckpt=None,
                              max_norm=None,
                              trainable=True,
-                             do_fusion=False):
+                             do_fusion=True):
   """List of dense columns that convert from sparse, categorical input.
 
   This is similar to `embedding_column`, except that it produces a list of
@@ -1194,7 +1194,7 @@ def shared_embedding_column(categorical_column,
                             max_norm=None,
                             trainable=True,
                             coalesced_scope=None,
-                            do_fusion=False):
+                            do_fusion=True):
   """Dense column that convert from sparse, categorical input.
 
   This is similar to `embedding_column`, except that it produces a 
@@ -2523,7 +2523,9 @@ def categorical_column_with_identity(key, num_buckets, default_value=None):
 
 
 @tf_export('feature_column.indicator_column')
-def indicator_column(categorical_column):
+def indicator_column(categorical_column,
+                     embedding_dim=16,
+                     do_fusion=True):
   """Represents multi-hot representation of given categorical column.
 
   - For DNN model, `indicator_column` can be used to wrap any
@@ -2554,9 +2556,9 @@ def indicator_column(categorical_column):
   Returns:
     An `IndicatorColumn`.
   """
-  return IndicatorColumn(categorical_column)
-
-
+#  return IndicatorColumn(categorical_column)
+  return embedding_column(categorical_column, embedding_dim, do_fusion=do_fusion) if embedding_dim else \
+         IndicatorColumn(categorical_column)
 @tf_export('feature_column.weighted_categorical_column')
 def weighted_categorical_column(categorical_column,
                                 weight_feature_key,

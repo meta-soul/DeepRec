@@ -52,6 +52,9 @@ from tensorflow.python.util import nest
 from tensorflow.python.util.deprecation import deprecated
 from tensorflow.python.util.tf_export import tf_export
 
+from tensorflow.python.util.deprecation import deprecated_args
+from tensorflow.python.ops import gen_rnn_ops
+
 _BIAS_VARIABLE_NAME = "bias"
 _WEIGHTS_VARIABLE_NAME = "kernel"
 
@@ -480,6 +483,319 @@ class BasicRNNCell(LayerRNNCell):
     return dict(list(base_config.items()) + list(config.items()))
 
 
+# =======================C++版本GRU=========================
+
+# @tf_export(v1=["nn.rnn_cell.GRUCell"])
+# class GRUCell(LayerRNNCell):
+#   r"""Block GRU cell implementation.
+
+#   Deprecated: use GRUBlockCellV2 instead.
+
+#   The implementation is based on:  http://arxiv.org/abs/1406.1078
+#   Computes the GRU cell forward propagation for 1 time step.
+
+#   This kernel op implements the following mathematical equations:
+
+#   Biases are initialized with:
+
+#   * `b_ru` - constant_initializer(1.0)
+#   * `b_c` - constant_initializer(0.0)
+
+#   ```
+#   x_h_prev = [x, h_prev]
+
+#   [r_bar u_bar] = x_h_prev * w_ru + b_ru
+
+#   r = sigmoid(r_bar)
+#   u = sigmoid(u_bar)
+
+#   h_prevr = h_prev \circ r
+
+#   x_h_prevr = [x h_prevr]
+
+#   c_bar = x_h_prevr * w_c + b_c
+#   c = tanh(c_bar)
+
+#   h = (1-u) \circ c + u \circ h_prev
+#   ```
+
+#   """
+
+#   @deprecated_args(None, "cell_size is deprecated, use num_units instead",
+#                    "cell_size")
+#   def __init__(self,
+#                num_units=None,
+#                cell_size=None,
+#                reuse=None,
+#                name="gru_cell"):
+#     """Initialize the Block GRU cell.
+
+#     Args:
+#       num_units: int, The number of units in the GRU cell.
+#       cell_size: int, The old (deprecated) name for `num_units`.
+#       reuse: (optional) boolean describing whether to reuse variables in an
+#         existing scope.  If not `True`, and the existing scope already has the
+#         given variables, an error is raised.
+#       name: String, the name of the layer. Layers with the same name will
+#         share weights, but to avoid mistakes we require reuse=True in such
+#         cases.  By default this is "lstm_cell", for variable-name compatibility
+#         with `tf.compat.v1.nn.rnn_cell.GRUCell`.
+
+#     Raises:
+#       ValueError: if both cell_size and num_units are not None;
+#         or both are None.
+#     """
+#     super(GRUCell, self).__init__(_reuse=reuse, name=name)
+#     if (cell_size is None) == (num_units is None):
+#       raise ValueError(
+#           "Exactly one of num_units or cell_size must be provided.")
+#     if num_units is None:
+#       num_units = cell_size
+#     self._cell_size = num_units
+#     # Inputs must be 2-dimensional.
+#     self.input_spec = input_spec.InputSpec(ndim=2)
+
+#   @property
+#   def state_size(self):
+#     return self._cell_size
+
+#   @property
+#   def output_size(self):
+#     return self._cell_size
+
+#   def build(self, input_shape):
+#     """GRU cell."""
+#     input_size = tensor_shape.dimension_value(input_shape[1])
+#     if input_size is None:
+#       raise ValueError("Expecting input_size to be set.")
+
+#     self._gate_kernel = self.add_variable(
+#         "gates/kernel", [input_size + self._cell_size, self._cell_size * 2])
+#     self._gate_bias = self.add_variable(
+#         "gates/bias", [self._cell_size * 2],
+#         initializer=init_ops.constant_initializer(1.0))
+#     self._candidate_kernel = self.add_variable(
+#         "candidate/kernel", [input_size + self._cell_size, self._cell_size])
+#     self._candidate_bias = self.add_variable(
+#         "candidate/bias", [self._cell_size],
+#         initializer=init_ops.constant_initializer(0.0))
+
+
+#     self.built = True
+
+#   def call(self, inputs, h_prev):
+#     """GRU cell."""
+#     # Check cell_size == state_size from h_prev.
+#     cell_size = h_prev.get_shape().with_rank(2)[1]
+#     if cell_size != self._cell_size:
+#       raise ValueError("Shape of h_prev[1] incorrect: cell_size %i vs %s" %
+#                        (self._cell_size, cell_size))
+
+#     _gru_block_cell = gen_rnn_ops.gru_block_cell  # pylint: disable=invalid-name
+#     _, _, _, new_h = _gru_block_cell(
+#         x=inputs,
+#         h_prev=h_prev,
+#         w_ru=self._gate_kernel,
+#         w_c=self._candidate_kernel,
+#         b_ru=self._gate_bias,
+#         b_c=self._candidate_bias)
+
+#     return new_h, new_h
+
+# @ops.RegisterGradient("GRUCell")
+# def _GRUCellGrad(op, *grad):
+#   r"""Gradient for GRUBlockCell.
+
+#   Args:
+#     op: Op for which the gradient is defined.
+#     *grad: Gradients of the optimization function wrt output
+#       for the Op.
+
+#   Returns:
+#     d_x: Gradients wrt to x
+#     d_h: Gradients wrt to h
+#     d_w_ru: Gradients wrt to w_ru
+#     d_w_c: Gradients wrt to w_c
+#     d_b_ru: Gradients wrt to b_ru
+#     d_b_c: Gradients wrt to b_c
+
+#   Mathematics behind the Gradients below:
+#   ```
+#   d_c_bar = d_h \circ (1-u) \circ (1-c \circ c)
+#   d_u_bar = d_h \circ (h-c) \circ u \circ (1-u)
+
+#   d_r_bar_u_bar = [d_r_bar d_u_bar]
+
+#   [d_x_component_1 d_h_prev_component_1] = d_r_bar_u_bar * w_ru^T
+
+#   [d_x_component_2 d_h_prevr] = d_c_bar * w_c^T
+
+#   d_x = d_x_component_1 + d_x_component_2
+
+#   d_h_prev = d_h_prev_component_1 + d_h_prevr \circ r + u
+#   ```
+#   Below calculation is performed in the python wrapper for the Gradients
+#   (not in the gradient kernel.)
+#   ```
+#   d_w_ru = x_h_prevr^T * d_c_bar
+
+#   d_w_c = x_h_prev^T * d_r_bar_u_bar
+
+#   d_b_ru = sum of d_r_bar_u_bar along axis = 0
+
+#   d_b_c = sum of d_c_bar along axis = 0
+#   ```
+#   """
+#   x, h_prev, w_ru, w_c, b_ru, b_c = op.inputs
+#   r, u, c, _ = op.outputs
+#   _, _, _, d_h = grad
+
+#   d_x, d_h_prev, d_c_bar, d_r_bar_u_bar = gen_rnn_ops.gru_block_cell_grad(
+#       x, h_prev, w_ru, w_c, b_ru, b_c, r, u, c, d_h)
+
+#   x_h_prev = array_ops.concat([x, h_prev], 1)
+#   d_w_ru = math_ops.matmul(x_h_prev, d_r_bar_u_bar, transpose_a=True)
+#   d_b_ru = nn_ops.bias_add_grad(d_r_bar_u_bar)
+
+#   x_h_prevr = array_ops.concat([x, h_prev * r], 1)
+#   d_w_c = math_ops.matmul(x_h_prevr, d_c_bar, transpose_a=True)
+#   d_b_c = nn_ops.bias_add_grad(d_c_bar)
+
+#   return d_x, d_h_prev, d_w_ru, d_w_c, d_b_ru, d_b_c
+
+
+# ===================原始GRU===================
+
+# @tf_export(v1=["nn.rnn_cell.GRUCell"])
+# class GRUCell(LayerRNNCell):
+#   """Gated Recurrent Unit cell (cf.
+
+#   http://arxiv.org/abs/1406.1078).
+
+#   Note that this cell is not optimized for performance. Please use
+#   `tf.contrib.cudnn_rnn.CudnnGRU` for better performance on GPU, or
+#   `tf.contrib.rnn.GRUBlockCellV2` for better performance on CPU.
+
+#   Args:
+#     num_units: int, The number of units in the GRU cell.
+#     activation: Nonlinearity to use.  Default: `tanh`.
+#     reuse: (optional) Python boolean describing whether to reuse variables in an
+#       existing scope.  If not `True`, and the existing scope already has the
+#       given variables, an error is raised.
+#     kernel_initializer: (optional) The initializer to use for the weight and
+#       projection matrices.
+#     bias_initializer: (optional) The initializer to use for the bias.
+#     name: String, the name of the layer. Layers with the same name will share
+#       weights, but to avoid mistakes we require reuse=True in such cases.
+#     dtype: Default dtype of the layer (default of `None` means use the type of
+#       the first input). Required when `build` is called before `call`.
+#     **kwargs: Dict, keyword named properties for common layer attributes, like
+#       `trainable` etc when constructing the cell from configs of get_config().
+#   """
+
+#   @deprecated(None, "This class is equivalent as tf.keras.layers.GRUCell,"
+#               " and will be replaced by that in Tensorflow 2.0.")
+#   def __init__(self,
+#                num_units,
+#                activation=None,
+#                reuse=None,
+#                kernel_initializer=None,
+#                bias_initializer=None,
+#                name=None,
+#                dtype=None,
+#                **kwargs):
+#     super(GRUCell, self).__init__(
+#         _reuse=reuse, name=name, dtype=dtype, **kwargs)
+#     _check_supported_dtypes(self.dtype)
+    
+#     if context.executing_eagerly() and context.num_gpus() > 0:
+#       logging.warn(
+#           "%s: Note that this cell is not optimized for performance. "
+#           "Please use tf.contrib.cudnn_rnn.CudnnGRU for better "
+#           "performance on GPU.", self)
+#     # Inputs must be 2-dimensional.
+#     self.input_spec = input_spec.InputSpec(ndim=2)
+
+#     self._num_units = num_units
+#     if activation:
+#       self._activation = activations.get(activation)
+#     else:
+#       self._activation = math_ops.tanh
+#     self._kernel_initializer = initializers.get(kernel_initializer)
+#     self._bias_initializer = initializers.get(bias_initializer)
+
+#   @property
+#   def state_size(self):
+#     return self._num_units
+
+#   @property
+#   def output_size(self):
+#     return self._num_units
+
+#   @tf_utils.shape_type_conversion
+#   def build(self, inputs_shape):
+#     if inputs_shape[-1] is None:
+#       raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s" %
+#                        str(inputs_shape))
+#     _check_supported_dtypes(self.dtype)
+#     input_depth = inputs_shape[-1]
+#     self._gate_kernel = self.add_variable(
+#         "gates/%s" % _WEIGHTS_VARIABLE_NAME,
+#         shape=[input_depth + self._num_units, 2 * self._num_units],
+#         initializer=self._kernel_initializer)
+#     self._gate_bias = self.add_variable(
+#         "gates/%s" % _BIAS_VARIABLE_NAME,
+#         shape=[2 * self._num_units],
+#         initializer=(self._bias_initializer
+#                      if self._bias_initializer is not None else
+#                      init_ops.constant_initializer(1.0, dtype=self.dtype)))
+#     self._candidate_kernel = self.add_variable(
+#         "candidate/%s" % _WEIGHTS_VARIABLE_NAME,
+#         shape=[input_depth + self._num_units, self._num_units],
+#         initializer=self._kernel_initializer)
+#     self._candidate_bias = self.add_variable(
+#         "candidate/%s" % _BIAS_VARIABLE_NAME,
+#         shape=[self._num_units],
+#         initializer=(self._bias_initializer
+#                      if self._bias_initializer is not None else
+#                      init_ops.zeros_initializer(dtype=self.dtype)))
+
+#     self.built = True
+
+#   def call(self, inputs, state):
+    
+#     _check_rnn_cell_input_dtypes([inputs, state])
+
+#     gate_inputs = math_ops.matmul(
+#         array_ops.concat([inputs, state], 1), self._gate_kernel)
+#     gate_inputs = nn_ops.bias_add(gate_inputs, self._gate_bias)
+
+#     value = math_ops.sigmoid(gate_inputs)
+#     r, u = array_ops.split(value=value, num_or_size_splits=2, axis=1)
+
+#     r_state = r * state
+
+#     candidate = math_ops.matmul(
+#         array_ops.concat([inputs, r_state], 1), self._candidate_kernel)
+#     candidate = nn_ops.bias_add(candidate, self._candidate_bias)
+
+#     c = self._activation(candidate)
+#     new_h = u * state + (1 - u) * c
+#     return new_h, new_h
+
+#   def get_config(self):
+#     config = {
+#         "num_units": self._num_units,
+#         "kernel_initializer": initializers.serialize(self._kernel_initializer),
+#         "bias_initializer": initializers.serialize(self._bias_initializer),
+#         "activation": activations.serialize(self._activation),
+#         "reuse": self._reuse,
+#     }
+#     base_config = super(GRUCell, self).get_config()
+#     return dict(list(base_config.items()) + list(config.items()))
+
+
+# ===================SRU原始版本 ============================
 @tf_export(v1=["nn.rnn_cell.GRUCell"])
 class GRUCell(LayerRNNCell):
   """Gated Recurrent Unit cell (cf.
@@ -521,7 +837,7 @@ class GRUCell(LayerRNNCell):
     super(GRUCell, self).__init__(
         _reuse=reuse, name=name, dtype=dtype, **kwargs)
     _check_supported_dtypes(self.dtype)
-
+    
     if context.executing_eagerly() and context.num_gpus() > 0:
       logging.warn(
           "%s: Note that this cell is not optimized for performance. "
@@ -531,13 +847,13 @@ class GRUCell(LayerRNNCell):
     self.input_spec = input_spec.InputSpec(ndim=2)
 
     self._num_units = num_units
-    if activation:
-      self._activation = activations.get(activation)
-    else:
-      self._activation = math_ops.tanh
-    self._kernel_initializer = initializers.get(kernel_initializer)
-    self._bias_initializer = initializers.get(bias_initializer)
 
+    self._activation = math_ops.tanh
+    
+    self._kernel_initializer = initializers.orthogonal()
+
+    self._bias_initializer = initializers.zeros()
+    
   @property
   def state_size(self):
     return self._num_units
@@ -553,49 +869,49 @@ class GRUCell(LayerRNNCell):
                        str(inputs_shape))
     _check_supported_dtypes(self.dtype)
     input_depth = inputs_shape[-1]
-    self._gate_kernel = self.add_variable(
-        "gates/%s" % _WEIGHTS_VARIABLE_NAME,
-        shape=[input_depth + self._num_units, 2 * self._num_units],
+    self._Wf = self.add_variable(
+        "Wf",
+        shape=[self._num_units, self._num_units],
         initializer=self._kernel_initializer)
-    self._gate_bias = self.add_variable(
-        "gates/%s" % _BIAS_VARIABLE_NAME,
-        shape=[2 * self._num_units],
-        initializer=(self._bias_initializer
-                     if self._bias_initializer is not None else
-                     init_ops.constant_initializer(1.0, dtype=self.dtype)))
-    self._candidate_kernel = self.add_variable(
-        "candidate/%s" % _WEIGHTS_VARIABLE_NAME,
-        shape=[input_depth + self._num_units, self._num_units],
+
+    self._bf = self.add_variable(
+        'bf',
+        shape=[self._num_units], 
+        initializer=self._bias_initializer)
+
+    self._Wr = self.add_variable(
+        "Wr",
+        shape=[self._num_units, self._num_units],
         initializer=self._kernel_initializer)
-    self._candidate_bias = self.add_variable(
-        "candidate/%s" % _BIAS_VARIABLE_NAME,
+
+    self._br = self.add_variable(
+        'br',
         shape=[self._num_units],
-        initializer=(self._bias_initializer
-                     if self._bias_initializer is not None else
-                     init_ops.zeros_initializer(dtype=self.dtype)))
+        initializer=self._bias_initializer)
+
+    self._U = self.add_variable(
+        "U",
+        shape=[self._num_units, self._num_units],
+        initializer=self._kernel_initializer)
+
 
     self.built = True
 
   def call(self, inputs, state):
-    """Gated recurrent unit (GRU) with nunits cells."""
+    
     _check_rnn_cell_input_dtypes([inputs, state])
 
-    gate_inputs = math_ops.matmul(
-        array_ops.concat([inputs, state], 1), self._gate_kernel)
-    gate_inputs = nn_ops.bias_add(gate_inputs, self._gate_bias)
+    f = math_ops.sigmoid(
+                math_ops.matmul(inputs, self._Wf) + self._bf
+            )
+    r = math_ops.sigmoid(
+                math_ops.matmul(inputs, self._Wf) + self._bf
+            )
+    c_prev = state
+    c = f * c_prev + (1.0 - f) * math_ops.matmul(inputs, self._U)
 
-    value = math_ops.sigmoid(gate_inputs)
-    r, u = array_ops.split(value=value, num_or_size_splits=2, axis=1)
-
-    r_state = r * state
-
-    candidate = math_ops.matmul(
-        array_ops.concat([inputs, r_state], 1), self._candidate_kernel)
-    candidate = nn_ops.bias_add(candidate, self._candidate_bias)
-
-    c = self._activation(candidate)
-    new_h = u * state + (1 - u) * c
-    return new_h, new_h
+    new_state = r * self._activation(c) + (1.0 - r) * inputs
+    return new_state, c
 
   def get_config(self):
     config = {
@@ -608,6 +924,118 @@ class GRUCell(LayerRNNCell):
     base_config = super(GRUCell, self).get_config()
     return dict(list(base_config.items()) + list(config.items()))
 
+
+# ======================分割线===========================
+
+
+# # ===================SRU 修改v3 ============================
+# @tf_export(v1=["nn.rnn_cell.GRUCell"])
+# class GRUCell(LayerRNNCell):
+#   """Gated Recurrent Unit cell (cf.
+
+#   http://arxiv.org/abs/1406.1078).
+
+#   Note that this cell is not optimized for performance. Please use
+#   `tf.contrib.cudnn_rnn.CudnnGRU` for better performance on GPU, or
+#   `tf.contrib.rnn.GRUBlockCellV2` for better performance on CPU.
+
+#   Args:
+#     num_units: int, The number of units in the GRU cell.
+#     activation: Nonlinearity to use.  Default: `tanh`.
+#     reuse: (optional) Python boolean describing whether to reuse variables in an
+#       existing scope.  If not `True`, and the existing scope already has the
+#       given variables, an error is raised.
+#     kernel_initializer: (optional) The initializer to use for the weight and
+#       projection matrices.
+#     bias_initializer: (optional) The initializer to use for the bias.
+#     name: String, the name of the layer. Layers with the same name will share
+#       weights, but to avoid mistakes we require reuse=True in such cases.
+#     dtype: Default dtype of the layer (default of `None` means use the type of
+#       the first input). Required when `build` is called before `call`.
+#     **kwargs: Dict, keyword named properties for common layer attributes, like
+#       `trainable` etc when constructing the cell from configs of get_config().
+#   """
+
+#   @deprecated(None, "This class is equivalent as tf.keras.layers.GRUCell,"
+#               " and will be replaced by that in Tensorflow 2.0.")
+#   def __init__(self,
+#                num_units,
+#                activation=None,
+#                reuse=None,
+#                kernel_initializer=None,
+#                bias_initializer=None,
+#                name=None,
+#                dtype=None,
+#                **kwargs):
+#     super(GRUCell, self).__init__(
+#         _reuse=reuse, name=name, dtype=dtype, **kwargs)
+#     _check_supported_dtypes(self.dtype)
+    
+#     if context.executing_eagerly() and context.num_gpus() > 0:
+#       logging.warn(
+#           "%s: Note that this cell is not optimized for performance. "
+#           "Please use tf.contrib.cudnn_rnn.CudnnGRU for better "
+#           "performance on GPU.", self)
+#     # Inputs must be 2-dimensional.
+#     self.input_spec = input_spec.InputSpec(ndim=2)
+
+#     self._num_units = num_units
+
+#     self._activation = math_ops.sigmoid
+    
+#     self._kernel_initializer = initializers.orthogonal()
+    
+#   @property
+#   def state_size(self):
+#     return self._num_units
+
+#   @property
+#   def output_size(self):
+#     return self._num_units
+
+#   @tf_utils.shape_type_conversion
+#   def build(self, inputs_shape):
+#     if inputs_shape[-1] is None:
+#       raise ValueError("Expected inputs.shape[-1] to be known, saw shape: %s" %
+#                        str(inputs_shape))
+#     _check_supported_dtypes(self.dtype)
+#     input_depth = inputs_shape[-1]
+#     self._Wf = self.add_variable(
+#         "forget_gate",
+#         shape=[self._num_units, self._num_units],
+#         initializer=self._kernel_initializer)
+
+#     self._U = self.add_variable(
+#         "U",
+#         shape=[self._num_units, self._num_units],
+#         initializer=self._kernel_initializer)
+
+
+#     self.built = True
+
+#   def call(self, inputs, state):
+    
+#     _check_rnn_cell_input_dtypes([inputs, state])
+
+#     f = self._activation(
+#                 math_ops.matmul(inputs, self._Wf)
+#             )
+
+#     new_state = f * state + (1.0 - f) * math_ops.matmul(inputs, self._U)
+#     return new_state, new_state
+
+#   def get_config(self):
+#     config = {
+#         "num_units": self._num_units,
+#         "kernel_initializer": initializers.serialize(self._kernel_initializer),
+#         "activation": activations.serialize(self._activation),
+#         "reuse": self._reuse,
+#     }
+#     base_config = super(GRUCell, self).get_config()
+#     return dict(list(base_config.items()) + list(config.items()))
+
+
+# ======================分割线===========================
 
 _LSTMStateTuple = collections.namedtuple("LSTMStateTuple", ("c", "h"))
 
@@ -1345,3 +1773,4 @@ def _check_supported_dtypes(dtype):
   if not (dtype.is_floating or dtype.is_complex):
     raise ValueError("RNN cell only supports floating point inputs, "
                      "but saw dtype: %s" % dtype)
+

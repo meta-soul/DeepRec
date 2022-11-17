@@ -376,7 +376,8 @@ def linear_model(features,
                  sparse_combiner='sum',
                  weight_collections=None,
                  trainable=True,
-                 cols_to_vars=None):
+                 cols_to_vars=None,
+                 embedding_dim=16):
   """Returns a linear prediction `Tensor` based on given `feature_columns`.
 
   This function generates a weighted sum based on output dimension `units`.
@@ -492,20 +493,31 @@ def linear_model(features,
     ValueError: if an item in `feature_columns` is neither a `_DenseColumn`
       nor `_CategoricalColumn`.
   """
-  with variable_scope.variable_scope(None, 'linear_model') as vs:
-    model_name = _strip_leading_slashes(vs.name)
-  linear_model_layer = _LinearModel(
-      feature_columns=feature_columns,
-      units=units,
-      sparse_combiner=sparse_combiner,
-      weight_collections=weight_collections,
-      trainable=trainable,
-      name=model_name)
-  retval = linear_model_layer(features)  # pylint: disable=not-callable
-  if cols_to_vars is not None:
-    cols_to_vars.update(linear_model_layer.cols_to_vars())
-  return retval
+#  with variable_scope.variable_scope(None, 'linear_model') as vs:
+#    model_name = _strip_leading_slashes(vs.name)
+#  linear_model_layer = _LinearModel(
+#      feature_columns=feature_columns,
+#      units=units,
+#      sparse_combiner=sparse_combiner,
+#      weight_collections=weight_collections,
+#      trainable=trainable,
+#      name=model_name)
+#  retval = linear_model_layer(features)  # pylint: disable=not-callable
+#  if cols_to_vars is not None:
+#    cols_to_vars.update(linear_model_layer.cols_to_vars())
+#  return retval
 
+  import tensorflow as tf
+  from tensorflow.python.feature_column import feature_column_v2 as fc_new
+  wide_columns = []
+  for col in feature_columns:
+    if isinstance(col, fc_new.HashedCategoricalColumn):
+      col = fc_new.embedding_column(col, embedding_dim)
+    elif isinstance(col, fc_new.CategoricalColumn):
+      col = fc_new.indicator_column(col)
+    wide_columns.append(col)
+  wide_input = input_layer(features, wide_columns)
+  return tf.reduce_sum(wide_input, axis=1, keepdims=True)
 
 def _add_to_collections(var, weight_collections):
   """Adds a var to the list of weight_collections provided.
