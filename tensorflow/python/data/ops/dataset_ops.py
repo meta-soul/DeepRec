@@ -1067,7 +1067,7 @@ class DatasetV2(tracking_base.Trackable, composite_tensor.CompositeTensor):
     """
     return ShardDataset(self, num_shards, index)
 
-  def batch(self, batch_size, drop_remainder=False, micro_batch_num=8):
+  def batch(self, batch_size, drop_remainder=False):
     """Combines consecutive elements of this dataset into batches.
 
     The components of the resulting element will have an additional outer
@@ -1088,14 +1088,7 @@ class DatasetV2(tracking_base.Trackable, composite_tensor.CompositeTensor):
     Returns:
       Dataset: A `Dataset`.
     """
-    # return BatchDataset(self, batch_size, drop_remainder)
-    import math
-    import os
-    cur_dir = os.getcwd()
-    cur_algo = os.path.basename(cur_dir)
-    if cur_algo == 'DIEN':
-        micro_batch_num = 2
-    return BatchDataset(self, math.ceil(batch_size/micro_batch_num), drop_remainder)
+    return BatchDataset(self, batch_size, drop_remainder)
 
   def padded_batch(self,
                    batch_size,
@@ -3959,4 +3952,3 @@ class _UnbatchDataset(UnaryDataset):
   @property
   def element_spec(self):
     return self._structure
-
