@@ -44,29 +44,30 @@ class AdamAsyncOptimizer(optimizer.Optimizer):
   ([pdf](http://arxiv.org/pdf/1412.6980.pdf)).
   """
 
-  def __init__(self, learning_rate=0.001, beta1=0.9, beta2=0.999, epsilon=1e-8,
-               use_locking=False, apply_sparse_rmsprop=False, name="AdamAsync"):
-    """Construct a new Adam optimizer for training asynchronous.
+  def __init__(self,
+               learning_rate=0.001,
+               beta1=0.9,
+               beta2=0.999,
+               epsilon=1e-8,
+               use_locking=False,
+               name="Adam"):
+    r"""Construct a new Adam optimizer.
 
     Initialization:
 
-    ```
-    m_0 <- 0 (Initialize initial 1st moment vector)
-    v_0 <- 0 (Initialize initial 2nd moment vector)
-    t <- 0 (Initialize timestep)
-    ```
+    $$m_0 := 0 \text{(Initialize initial 1st moment vector)}$$
+    $$v_0 := 0 \text{(Initialize initial 2nd moment vector)}$$
+    $$t := 0 \text{(Initialize timestep)}$$
 
     The update rule for `variable` with gradient `g` uses an optimization
-    described at the end of section2 of the paper:
+    described at the end of section 2 of the paper:
 
-    ```
-    t <- t + 1
-    lr_t <- learning_rate * sqrt(1 - beta2^t) / (1 - beta1^t)
+    $$t := t + 1$$
+    $$lr_t := \text{learning\_rate} * \sqrt{1 - beta_2^t} / (1 - beta_1^t)$$
 
-    m_t <- beta1 * m_{t-1} + (1 - beta1) * g
-    v_t <- beta2 * v_{t-1} + (1 - beta2) * g * g
-    variable <- variable - lr_t * m_t / (sqrt(v_t) + epsilon)
-    ```
+    $$m_t := beta_1 * m_{t-1} + (1 - beta_1) * g$$
+    $$v_t := beta_2 * v_{t-1} + (1 - beta_2) * g * g$$
+    $$variable := variable - lr_t * m_t / (\sqrt{v_t} + \epsilon)$$
 
     The default value of 1e-8 for epsilon might not be a good default in
     general. For example, when training an Inception network on ImageNet a
@@ -86,17 +87,20 @@ class AdamAsyncOptimizer(optimizer.Optimizer):
 
     Args:
       learning_rate: A Tensor or a floating point value.  The learning rate.
-      beta1: A float value or a constant float tensor.
-        The exponential decay rate for the 1st moment estimates.
-      beta2: A float value or a constant float tensor.
-        The exponential decay rate for the 2nd moment estimates.
+      beta1: A float value or a constant float tensor. The exponential decay
+        rate for the 1st moment estimates.
+      beta2: A float value or a constant float tensor. The exponential decay
+        rate for the 2nd moment estimates.
       epsilon: A small constant for numerical stability. This epsilon is
         "epsilon hat" in the Kingma and Ba paper (in the formula just before
         Section 2.1), not the epsilon in Algorithm 1 of the paper.
       use_locking: If True use locks for update operations.
-      apply_sparse_rmsprop: If True use rmsprop optimizer for sparse apply.
       name: Optional name for the operations created when applying gradients.
-        Defaults to "AdamASync".
+        Defaults to "Adam".  @compatibility(eager) When eager execution is
+        enabled, `learning_rate`, `beta1`, `beta2`, and `epsilon` can each be a
+        callable that takes no arguments and returns the actual value to use.
+        This can be useful for changing these values across different
+        invocations of optimizer functions. @end_compatibility
     """
     super(AdamAsyncOptimizer, self).__init__(use_locking, name)
     self._lr = learning_rate
@@ -110,89 +114,123 @@ class AdamAsyncOptimizer(optimizer.Optimizer):
     self._beta2_t = None
     self._epsilon_t = None
 
-    # Created in SparseApply if needed.
-    self._updated_lr = None
-
-    self._apply_sparse_rmsprop = apply_sparse_rmsprop
+  def _get_beta_accumulators(self):
+    with ops.init_scope():
+      if context.executing_eagerly():
+        graph = None
+      else:
+        graph = ops.get_default_graph()
+      return (self._get_non_slot_variable("beta1_power", graph=graph),
+              self._get_non_slot_variable("beta2_power", graph=graph))
 
   def _create_slots(self, var_list):
-    # When training asynchronous, we create the beta1 and beta2 accumulators for
-    # each variable to avoid communication bottlenecks.
+    # Create the beta1 and beta2 accumulators on the same device as the first
+    # variable. Sort the var_list to make sure this device is consistent across
+    # workers (these need to go on the same PS, otherwise some updates are
+    # silently ignored).
+    first_var = min(var_list, key=lambda x: x.name)
+    self._create_non_slot_variable(
+        initial_value=self._beta1, name="beta1_power", colocate_with=first_var)
+    self._create_non_slot_variable(
+        initial_value=self._beta2, name="beta2_power", colocate_with=first_var)
 
-    # Create slots for the moments.
+    # Create slots for the first and second moments.
     for v in var_list:
-      with ops.colocate_with(v):
-        self._zeros_slot(v, "m", self._name, slot_config=slot_creator.SlotConfig(slot_index=1, slot_num=2))
-        self._zeros_slot(v, "v", self._name, slot_config=slot_creator.SlotConfig(slot_index=2, slot_num=2))
-        if isinstance(v, kv_variable_ops.EmbeddingVariable):
-          self._get_or_make_slot(v,
-              array_ops.expand_dims(
-                ops.convert_to_tensor(self._beta1, dtype=v.dtype.base_dtype), -1),
-              "beta1_power", self._name, slot_config=slot_creator.SlotConfig(slot_type=config_pb2.SlotType.VARIABLE))
-          self._get_or_make_slot(v,
-              array_ops.expand_dims(
-                ops.convert_to_tensor(self._beta2, dtype=v.dtype.base_dtype), -1),
-              "beta2_power", self._name, slot_config=slot_creator.SlotConfig(slot_type=config_pb2.SlotType.VARIABLE))
-        else:
-          self._get_or_make_slot(v,
-              ops.convert_to_tensor(self._beta1, dtype=v.dtype.base_dtype),
-              "beta1_power", self._name)
-          self._get_or_make_slot(v,
-              ops.convert_to_tensor(self._beta2, dtype=v.dtype.base_dtype),
-              "beta2_power", self._name)
+      self._zeros_slot(v, "m", self._name, slot_config=slot_creator.SlotConfig(slot_index=1, slot_num=2))
+      self._zeros_slot(v, "v", self._name, slot_config=slot_creator.SlotConfig(slot_index=2, slot_num=2))
 
   def _prepare(self):
-    self._lr_t = ops.convert_to_tensor(self._lr, name="learning_rate")
-    self._beta1_t = ops.convert_to_tensor(self._beta1, name="beta1")
-    self._beta2_t = ops.convert_to_tensor(self._beta2, name="beta2")
-    self._epsilon_t = ops.convert_to_tensor(self._epsilon, name="epsilon")
+    lr = self._call_if_callable(self._lr)
+    beta1 = self._call_if_callable(self._beta1)
+    beta2 = self._call_if_callable(self._beta2)
+    epsilon = self._call_if_callable(self._epsilon)
+
+    self._lr_t = ops.convert_to_tensor(lr, name="learning_rate")
+    self._beta1_t = ops.convert_to_tensor(beta1, name="beta1")
+    self._beta2_t = ops.convert_to_tensor(beta2, name="beta2")
+    self._epsilon_t = ops.convert_to_tensor(epsilon, name="epsilon")
 
   def _apply_dense(self, grad, var):
     m = self.get_slot(var, "m")
     v = self.get_slot(var, "v")
-    beta1_power = self.get_slot(var, 'beta1_power')
-    beta2_power = self.get_slot(var, 'beta2_power')
-    return training_ops.apply_adam_async(
-        var, m, v, beta1_power, beta2_power,
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    return training_ops.apply_adam(
+        var,
+        m,
+        v,
+        math_ops.cast(beta1_power, var.dtype.base_dtype),
+        math_ops.cast(beta2_power, var.dtype.base_dtype),
         math_ops.cast(self._lr_t, var.dtype.base_dtype),
         math_ops.cast(self._beta1_t, var.dtype.base_dtype),
         math_ops.cast(self._beta2_t, var.dtype.base_dtype),
         math_ops.cast(self._epsilon_t, var.dtype.base_dtype),
-        grad, use_locking=self._use_locking).op
+        grad,
+        use_locking=self._use_locking).op
 
   def _resource_apply_dense(self, grad, var):
     m = self.get_slot(var, "m")
     v = self.get_slot(var, "v")
-    beta1_power = self.get_slot(var, 'beta1_power')
-    beta2_power = self.get_slot(var, 'beta2_power')
-    return training_ops.resource_apply_adam_async(
-        var.handle, m.handle, v.handle, beta1_power.handle, beta2_power.handle,
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    return training_ops.resource_apply_adam(
+        var.handle,
+        m.handle,
+        v.handle,
+        math_ops.cast(beta1_power, grad.dtype.base_dtype),
+        math_ops.cast(beta2_power, grad.dtype.base_dtype),
         math_ops.cast(self._lr_t, grad.dtype.base_dtype),
         math_ops.cast(self._beta1_t, grad.dtype.base_dtype),
         math_ops.cast(self._beta2_t, grad.dtype.base_dtype),
         math_ops.cast(self._epsilon_t, grad.dtype.base_dtype),
-        grad, use_locking=self._use_locking)
+        grad,
+        use_locking=self._use_locking)
 
-  def _apply_sparse(self, grad, var):
+  '''
+  def _apply_sparse_shared(self, grad, var, indices, scatter_add):
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    beta1_power = math_ops.cast(beta1_power, var.dtype.base_dtype)
+    beta2_power = math_ops.cast(beta2_power, var.dtype.base_dtype)
+    lr_t = math_ops.cast(self._lr_t, var.dtype.base_dtype)
+    beta1_t = math_ops.cast(self._beta1_t, var.dtype.base_dtype)
+    beta2_t = math_ops.cast(self._beta2_t, var.dtype.base_dtype)
+    epsilon_t = math_ops.cast(self._epsilon_t, var.dtype.base_dtype)
+    lr = (lr_t * math_ops.sqrt(1 - beta2_power) / (1 - beta1_power))
+    # m_t = beta1 * m + (1 - beta1) * g_t
     m = self.get_slot(var, "m")
+    m_scaled_g_values = grad * (1 - beta1_t)
+    m_t = state_ops.assign(m, m * beta1_t, use_locking=self._use_locking)
+    with ops.control_dependencies([m_t]):
+      m_t = scatter_add(m, indices, m_scaled_g_values)
+    # v_t = beta2 * v + (1 - beta2) * (g_t * g_t)
     v = self.get_slot(var, "v")
-    beta1_power = self.get_slot(var, 'beta1_power')
-    beta2_power = self.get_slot(var, 'beta2_power')
-    return training_ops.sparse_apply_adam_async(
-        var, m, v, beta1_power, beta2_power,
+    v_scaled_g_values = (grad * grad) * (1 - beta2_t)
+    v_t = state_ops.assign(v, v * beta2_t, use_locking=self._use_locking)
+    with ops.control_dependencies([v_t]):
+      v_t = scatter_add(v, indices, v_scaled_g_values)
+    v_sqrt = math_ops.sqrt(v_t)
+    var_update = state_ops.assign_sub(
+        var, lr * m_t / (v_sqrt + epsilon_t), use_locking=self._use_locking)
+    return control_flow_ops.group(*[var_update, m_t, v_t])
+  '''
+
+  def _apply_sparse_shared(self, grad, var, indices, scatter_add):
+    m = self.get_slot(var, 'm')
+    v = self.get_slot(var, 'v')
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    return training_ops.sparse_apply_adam(
+        var, m, v,
+        math_ops.cast(beta1_power, var.dtype.base_dtype),
+        math_ops.cast(beta2_power, var.dtype.base_dtype),
         math_ops.cast(self._lr_t, var.dtype.base_dtype),
         math_ops.cast(self._beta1_t, var.dtype.base_dtype),
         math_ops.cast(self._beta2_t, var.dtype.base_dtype),
         math_ops.cast(self._epsilon_t, var.dtype.base_dtype),
-        grad.values, grad.indices, use_locking=self._use_locking,
-        apply_sparse_rmsprop=self._apply_sparse_rmsprop)
+        grad, indices, use_locking=self._use_locking)
 
-  def _hash_table_apply_sparse(self, grad, var, indices):
-    m = self.get_slot(var, "m")
-    v = self.get_slot(var, "v")
-    beta1_power = self.get_slot(var, "beta1_power")
-    beta2_power = self.get_slot(var, "beta2_power")
-    update_op = gen_hash_training_ops.tensible_variable_apply_adam(
+  def _resource_apply_sparse_shared(self, grad, var, indices, scatter_add):
+    m = self.get_slot(var, 'm')
+    v = self.get_slot(var, 'v')
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    return training_ops.resource_sparse_apply_adam(
         var.handle, m.handle, v.handle,
         math_ops.cast(beta1_power, grad.dtype.base_dtype),
         math_ops.cast(beta2_power, grad.dtype.base_dtype),
@@ -201,36 +239,65 @@ class AdamAsyncOptimizer(optimizer.Optimizer):
         math_ops.cast(self._beta2_t, grad.dtype.base_dtype),
         math_ops.cast(self._epsilon_t, grad.dtype.base_dtype),
         grad, indices, use_locking=self._use_locking)
-    with ops.control_dependencies([update_op]):
-      update_beta1 = beta1_power.assign(
-          beta1_power * math_ops.cast(self._beta1_t, var.dtype.base_dtype),
-          use_locking=self._use_locking)
-      update_beta2 = beta2_power.assign(
-          beta2_power * math_ops.cast(self._beta2_t, var.dtype.base_dtype),
-          use_locking=self._use_locking)
-    return control_flow_ops.group(update_beta1, update_beta2)
+
+  def _apply_sparse(self, grad, var):
+    return self._apply_sparse_shared(
+        grad.values,
+        var,
+        grad.indices,
+        lambda x, i, v: state_ops.scatter_add(  # pylint: disable=g-long-lambda
+            x,
+            i,
+            v,
+            use_locking=self._use_locking))
+
+  def _hash_table_apply_sparse(self, grad, var, indices):
+    m = self.get_slot(var, "m")
+    v = self.get_slot(var, "v")
+    beta1_power, beta2_power = self._get_beta_accumulators()
+    return gen_hash_training_ops.tensible_variable_apply_adam(
+        var.handle, m.handle, v.handle,
+        math_ops.cast(beta1_power, grad.dtype.base_dtype),
+        math_ops.cast(beta2_power, grad.dtype.base_dtype),
+        math_ops.cast(self._lr_t, grad.dtype.base_dtype),
+        math_ops.cast(self._beta1_t, grad.dtype.base_dtype),
+        math_ops.cast(self._beta2_t, grad.dtype.base_dtype),
+        math_ops.cast(self._epsilon_t, grad.dtype.base_dtype),
+        grad, indices, use_locking=self._use_locking)
+
+  def _resource_scatter_add(self, x, i, v):
+    with ops.control_dependencies(
+        [resource_variable_ops.resource_scatter_add(x.handle, i, v)]):
+      return x.value()
 
   def _resource_apply_sparse(self, grad, var, indices):
     m = self.get_slot(var, "m")
     v = self.get_slot(var, "v")
-    beta1_power = self.get_slot(var, 'beta1_power')
-    beta2_power = self.get_slot(var, 'beta2_power')
+    beta1_power, beta2_power = self._get_beta_accumulators()
     if isinstance(var, kv_variable_ops.EmbeddingVariable):
       global_step = training_util.get_or_create_global_step()
-      return training_ops.kv_resource_sparse_apply_adam_async(
-        var.handle, m.handle, v.handle, beta1_power.handle, beta2_power.handle,
+      return training_ops.kv_resource_sparse_apply_adam(
+        var.handle, m.handle, v.handle,
+        math_ops.cast(beta1_power, grad.dtype),
+        math_ops.cast(beta2_power, grad.dtype),
         math_ops.cast(self._lr_t, grad.dtype),
         math_ops.cast(self._beta1_t, grad.dtype),
         math_ops.cast(self._beta2_t, grad.dtype),
         math_ops.cast(self._epsilon_t, grad.dtype),
-        grad, indices, global_step, use_locking=self._use_locking,
-        apply_sparse_rmsprop=self._apply_sparse_rmsprop)
+        grad, indices, global_step, use_locking=self._use_locking)
     else:
-      return training_ops.resource_sparse_apply_adam_async(
-        var.handle, m.handle, v.handle, beta1_power.handle, beta2_power.handle,
-        math_ops.cast(self._lr_t, grad.dtype),
-        math_ops.cast(self._beta1_t, grad.dtype),
-        math_ops.cast(self._beta2_t, grad.dtype),
-        math_ops.cast(self._epsilon_t, grad.dtype),
-        grad, indices, use_locking=self._use_locking,
-        apply_sparse_rmsprop=self._apply_sparse_rmsprop)
+      return self._resource_apply_sparse_shared(grad, var, indices,
+          self._resource_scatter_add)
+
+  def _finish(self, update_ops, name_scope):
+    # Update the power accumulators.
+    with ops.control_dependencies(update_ops):
+      beta1_power, beta2_power = self._get_beta_accumulators()
+      with ops.colocate_with(beta1_power):
+        update_beta1 = beta1_power.assign(
+            beta1_power * self._beta1_t, use_locking=self._use_locking)
+        update_beta2 = beta2_power.assign(
+            beta2_power * self._beta2_t, use_locking=self._use_locking)
+    return control_flow_ops.group(
+        *update_ops + [update_beta1, update_beta2], name=name_scope)
+
